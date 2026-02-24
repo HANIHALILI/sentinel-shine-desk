@@ -1,70 +1,208 @@
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+##
+## StatusGuard — Kubernetes Manifests
+## Single-database PostgreSQL architecture.
+## No external TSDB. No managed services. Fully offline.
+##
+
+# ─── Namespace ────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
 metadata:
-  name: statusguard-ingress
-  namespace: statusguard
-  annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-    # WebSocket support
-    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-    # X-Frame-Options: allow embedding
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      add_header X-Frame-Options "ALLOWALL";
-      add_header Content-Security-Policy "frame-ancestors *";
-spec:
-  ingressClassName: nginx
-  tls:
-    - hosts:
-        - status.example.com
-      secretName: statusguard-tls
-  rules:
-    - host: status.example.com
-      http:
-        paths:
-          # Frontend (static assets served by NGINX container)
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: statusguard-frontend
-                port:
-                  number: 80
-          # API
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: statusguard-api
-                port:
-                  number: 8080
-          # WebSocket
-          - path: /ws
-            pathType: Prefix
-            backend:
-              service:
-                name: statusguard-api
-                port:
-                  number: 8080
+  name: statusguard
 ---
+# ─── Secrets ──────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: statusguard-secrets
+  namespace: statusguard
+type: Opaque
+stringData:
+  # Replace with real values before deploying
+  database-url: "postgres://statusguard:changeme@statusguard-db:5432/statusguard?sslmode=disable"
+  oidc-issuer: "https://keycloak.example.com/realms/statusguard"
+  oidc-audience: "statusguard-api"
+  postgres-password: "changeme"
+---
+# ─── ConfigMap ────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: statusguard-config
+  namespace: statusguard
+data:
+  RETENTION_DAYS: "30"
+  CHECK_CONCURRENCY: "50"
+  RETENTION_CLEANUP_CRON: "0 3 * * *"
+  LISTEN_ADDR: ":8080"
+---
+# ─── PostgreSQL PVC ───────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: statusguard-db-pvc
+  namespace: statusguard
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: standard  # Uncomment and set for your cluster
+---
+# ─── PostgreSQL Deployment ────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statusguard-db
+  namespace: statusguard
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Single writer — no rolling update for DB
+  selector:
+    matchLabels:
+      app: statusguard-db
+  template:
+    metadata:
+      labels:
+        app: statusguard-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: statusguard
+            - name: POSTGRES_USER
+              value: statusguard
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: postgres-password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "statusguard"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "statusguard"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: statusguard-db-pvc
+---
+# ─── PostgreSQL Service ───────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
-  name: statusguard-frontend
+  name: statusguard-db
   namespace: statusguard
 spec:
   selector:
-    app: statusguard-frontend
+    app: statusguard-db
   ports:
-    - port: 80
-      targetPort: 80
+    - port: 5432
+      targetPort: 5432
+  clusterIP: None  # Headless for stable DNS
 ---
+# ─── Backend Deployment ───────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statusguard-api
+  namespace: statusguard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: statusguard-api
+  template:
+    metadata:
+      labels:
+        app: statusguard-api
+    spec:
+      initContainers:
+        # Wait for PostgreSQL to be ready before starting
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command: ["sh", "-c", "until pg_isready -h statusguard-db -U statusguard; do sleep 2; done"]
+      containers:
+        - name: api
+          image: statusguard/api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: database-url
+            - name: OIDC_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: oidc-issuer
+            - name: OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: oidc-audience
+          envFrom:
+            - configMapRef:
+                name: statusguard-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# ─── Backend Service ──────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: statusguard-api
+  namespace: statusguard
+spec:
+  selector:
+    app: statusguard-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# ─── Frontend Deployment ──────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -105,69 +243,65 @@ spec:
             initialDelaySeconds: 3
             periodSeconds: 10
 ---
+# ─── Frontend Service ─────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
-  name: statusguard-api
+  name: statusguard-frontend
   namespace: statusguard
 spec:
   selector:
-    app: statusguard-api
+    app: statusguard-frontend
   ports:
-    - port: 8080
-      targetPort: 8080
+    - port: 80
+      targetPort: 80
 ---
-apiVersion: apps/v1
-kind: Deployment
+# ─── Ingress ──────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
-  name: statusguard-api
+  name: statusguard-ingress
   namespace: statusguard
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      add_header X-Frame-Options "ALLOWALL";
+      add_header Content-Security-Policy "frame-ancestors *";
 spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: statusguard-api
-  template:
-    metadata:
-      labels:
-        app: statusguard-api
-    spec:
-      containers:
-        - name: api
-          image: statusguard/api:latest
-          ports:
-            - containerPort: 8080
-          env:
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: statusguard-secrets
-                  key: database-url
-            - name: METRICS_DB_URL
-              valueFrom:
-                secretKeyRef:
-                  name: statusguard-secrets
-                  key: metrics-db-url
-            - name: OIDC_ISSUER
-              value: "https://keycloak.example.com/realms/statusguard"
-            - name: OIDC_AUDIENCE
-              value: "statusguard-api"
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 10
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - status.example.com
+      secretName: statusguard-tls
+  rules:
+    - host: status.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-frontend
+                port:
+                  number: 80
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-api
+                port:
+                  number: 8080
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-api
+                port:
+                  number: 8080

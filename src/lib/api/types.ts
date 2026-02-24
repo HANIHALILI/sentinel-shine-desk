@@ -85,14 +85,27 @@ export interface CreateServiceRequest {
 export interface UpdateServiceRequest extends Partial<Omit<CreateServiceRequest, 'statusPageId'>> {}
 
 // ---- Metrics ----
+/** Single aggregated metric point — computed at query time from raw checks */
 export interface MetricPoint {
   timestamp: string;
   latencyAvg: number;
   latencyP95: number;
   latencyP99: number;
   availability: number;
-  /** null indicates missing data / gap */
+  /** Number of raw checks in this bucket */
+  checkCount: number;
+  /** True if no checks exist for this interval */
   isGap?: boolean;
+}
+
+/** Service summary stats computed from raw checks */
+export interface ServiceSummary {
+  availability: number;
+  avgLatency: number;
+  p95Latency: number;
+  p99Latency: number;
+  totalChecks: number;
+  failedChecks: number;
 }
 
 export type MetricResolution = '1m' | '5m' | '1h';
@@ -215,4 +228,19 @@ export interface ApiError {
   message: string;
   details?: Record<string, unknown>;
   status: number;
+}
+
+// ---- Admin Config ----
+export interface SystemConfig {
+  retentionDays: number;
+  checkConcurrency: number;
+}
+
+export interface UpdateSystemConfigRequest {
+  retentionDays?: number;
+  checkConcurrency?: number;
+}
+
+export interface CleanupResult {
+  deletedRows: number;
 }
