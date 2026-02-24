@@ -1,8 +1,12 @@
-import { Service } from '@/lib/types';
+import type { Service } from '@/lib/api/types';
 import { getStatusDotClass } from '@/lib/status-utils';
 import { LatencyChart } from './LatencyChart';
+import { useMetrics } from '@/hooks/use-metrics';
+import { LoadingState } from '@/components/LoadingState';
 
 export function ServiceCard({ service }: { service: Service }) {
+  const { data: metrics, isLoading } = useMetrics(service.id);
+
   return (
     <div className="bg-card border border-border rounded-lg p-5 space-y-4">
       <div className="flex items-center justify-between">
@@ -14,12 +18,18 @@ export function ServiceCard({ service }: { service: Service }) {
           </div>
         </div>
         <div className="text-right">
-          <div className="text-sm font-mono font-semibold text-card-foreground">{service.availability}%</div>
+          <div className="text-sm font-mono font-semibold text-card-foreground">{service.availability.toFixed(2)}%</div>
           <div className="text-xs text-muted-foreground">uptime</div>
         </div>
       </div>
 
-      <LatencyChart data={service.latencyHistory} />
+      {isLoading ? (
+        <div className="h-20 flex items-center justify-center">
+          <LoadingState message="Loading metrics..." className="py-2" />
+        </div>
+      ) : (
+        <LatencyChart data={metrics?.points || []} />
+      )}
 
       <div className="grid grid-cols-3 gap-3 pt-1">
         <MetricCell label="Avg" value={`${service.avgLatency}ms`} />

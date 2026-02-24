@@ -1,4 +1,4 @@
-import { ServiceStatus } from './types';
+import { ServiceStatus } from '@/lib/api/types';
 import { formatDistanceToNow, format } from 'date-fns';
 
 export function getStatusLabel(status: ServiceStatus): string {

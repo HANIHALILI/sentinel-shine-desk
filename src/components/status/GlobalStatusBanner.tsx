@@ -1,4 +1,4 @@
-import { ServiceStatus } from '@/lib/types';
+import type { ServiceStatus } from '@/lib/api/types';
 import { getStatusLabel, getStatusBg } from '@/lib/status-utils';
 import { AlertTriangle, CheckCircle2, XCircle, Wrench } from 'lucide-react';
 

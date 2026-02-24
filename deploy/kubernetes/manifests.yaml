@@ -1,0 +1,173 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: statusguard-ingress
+  namespace: statusguard
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    # X-Frame-Options: allow embedding
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "ALLOWALL";
+      add_header Content-Security-Policy "frame-ancestors *";
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - status.example.com
+      secretName: statusguard-tls
+  rules:
+    - host: status.example.com
+      http:
+        paths:
+          # Frontend (static assets served by NGINX container)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-frontend
+                port:
+                  number: 80
+          # API
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-api
+                port:
+                  number: 8080
+          # WebSocket
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: statusguard-api
+                port:
+                  number: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: statusguard-frontend
+  namespace: statusguard
+spec:
+  selector:
+    app: statusguard-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statusguard-frontend
+  namespace: statusguard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: statusguard-frontend
+  template:
+    metadata:
+      labels:
+        app: statusguard-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: statusguard/frontend:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: statusguard-api
+  namespace: statusguard
+spec:
+  selector:
+    app: statusguard-api
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: statusguard-api
+  namespace: statusguard
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: statusguard-api
+  template:
+    metadata:
+      labels:
+        app: statusguard-api
+    spec:
+      containers:
+        - name: api
+          image: statusguard/api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: database-url
+            - name: METRICS_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: statusguard-secrets
+                  key: metrics-db-url
+            - name: OIDC_ISSUER
+              value: "https://keycloak.example.com/realms/statusguard"
+            - name: OIDC_AUDIENCE
+              value: "statusguard-api"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
