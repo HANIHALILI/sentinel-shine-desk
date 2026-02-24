@@ -172,7 +172,11 @@ paths:
         required: true
         schema: { type: string, format: uuid }
     get:
-      summary: Get service metrics (histogram-based)
+      summary: Get service metrics (computed from raw checks via PERCENTILE_CONT)
+      description: |
+        Returns aggregated metric points computed at query time from the raw `checks` table.
+        Percentiles (p95, p99) are calculated using PostgreSQL's `PERCENTILE_CONT()` —
+        never precomputed, never averaged.
       tags: [Metrics]
       parameters:
         - name: range
@@ -193,6 +197,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/MetricsResponse'
+
+  /metrics/{serviceId}/summary:
+    parameters:
+      - name: serviceId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get service summary stats (availability, latency percentiles)
+      tags: [Metrics]
+      parameters:
+        - name: hours
+          in: query
+          schema: { type: integer, default: 24, minimum: 1, maximum: 720 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceSummary'
+
+  # ─── Admin Config ───────────────────────────────────────
+  /admin/config:
+    get:
+      summary: Get system configuration
+      tags: [Admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+    patch:
+      summary: Update system configuration
+      tags: [Admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSystemConfig'
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemConfig'
+
+  /admin/retention/cleanup:
+    post:
+      summary: Trigger manual retention cleanup
+      tags: [Admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deletedRows: { type: integer }
 
   # ─── Incidents ──────────────────────────────────────────
   /incidents:
@@ -504,11 +570,35 @@ components:
       required: [timestamp, latencyAvg, latencyP95, latencyP99, availability]
       properties:
         timestamp: { type: string, format: date-time }
-        latencyAvg: { type: number, format: float, description: 'Average latency in ms (histogram-computed)' }
-        latencyP95: { type: number, format: float, description: '95th percentile latency in ms' }
-        latencyP99: { type: number, format: float, description: '99th percentile latency in ms' }
-        availability: { type: number, format: float, description: 'Availability percentage for this interval' }
-        isGap: { type: boolean, description: 'True if no data was collected for this interval' }
+        latencyAvg: { type: number, format: float, description: 'Average latency in ms (computed from raw checks)' }
+        latencyP95: { type: number, format: float, description: '95th percentile via PERCENTILE_CONT(0.95)' }
+        latencyP99: { type: number, format: float, description: '99th percentile via PERCENTILE_CONT(0.99)' }
+        availability: { type: number, format: float, description: 'Availability % = up_checks / total_checks * 100' }
+        checkCount: { type: integer, description: 'Number of raw checks in this bucket' }
+        isGap: { type: boolean, description: 'True if no checks exist for this interval' }
+
+    ServiceSummary:
+      type: object
+      required: [availability, avgLatency, p95Latency, p99Latency, totalChecks, failedChecks]
+      properties:
+        availability: { type: number, format: float }
+        avgLatency: { type: number, format: float }
+        p95Latency: { type: number, format: float }
+        p99Latency: { type: number, format: float }
+        totalChecks: { type: integer }
+        failedChecks: { type: integer }
+
+    SystemConfig:
+      type: object
+      properties:
+        retentionDays: { type: integer }
+        checkConcurrency: { type: integer }
+
+    UpdateSystemConfig:
+      type: object
+      properties:
+        retentionDays: { type: integer, minimum: 1, maximum: 365 }
+        checkConcurrency: { type: integer, minimum: 1, maximum: 200 }
 
     # ── Incidents ──
     Incident:

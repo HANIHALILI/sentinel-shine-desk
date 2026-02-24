@@ -3,138 +3,216 @@
 ## Architecture Overview
 
 ```
-┌─────────────────┐    ┌──────────────┐    ┌──────────────────┐
-│   Frontend      │───▶│   REST API   │───▶│   PostgreSQL     │
-│   (this repo)   │    │   (Go/Rust)  │    │   (metadata)     │
-│                 │◀──▶│              │    └──────────────────┘
-│                 │ WS │              │───▶┌──────────────────┐
-└─────────────────┘    └──────┬───────┘    │ TimescaleDB /    │
-                              │            │ VictoriaMetrics  │
-                       ┌──────▼───────┐    │ (metrics)        │
-                       │   Worker     │───▶└──────────────────┘
-                       │   (checks)   │
-                       └──────────────┘
+┌─────────────────┐    ┌──────────────────────┐    ┌──────────────────┐
+│   Frontend      │───▶│   Backend            │───▶│   PostgreSQL     │
+│   (this repo)   │    │   (single container) │    │   (all data)     │
+│                 │◀──▶│                      │    └──────────────────┘
+│                 │ WS │   - REST API         │
+└─────────────────┘    │   - Health checker   │
+                       │   - Scheduler        │
+                       │   - WS hub           │
+                       └──────────────────────┘
 ```
+
+**Single database. Single backend container. No external dependencies.**
 
 ## Components
 
-### 1. REST API Server
-- Implements the OpenAPI spec in `docs/openapi.yaml`
-- Stateless — horizontally scalable
-- Validates OIDC JWT tokens (verify signature against JWKS endpoint)
-- RBAC: `admin` (full), `editor` (CRUD pages/incidents), `viewer` (read-only)
+### 1. Backend Server (Single Container)
 
-### 2. Worker Service
-- Runs monitoring checks at configured intervals
-- Supports HTTP, HTTPS, TCP, gRPC probes
-- Computes latency using **histogram buckets** (not simple averages)
-- Writes 1-minute resolution metrics to time-series storage
-- Auto-downgrades service status on consecutive failures
-- Auto-creates incidents when services go down
+The backend runs as one process with multiple goroutines/threads:
 
-### 3. Metrics Storage
-Recommended: **TimescaleDB** (PostgreSQL extension) or **VictoriaMetrics**
+- **REST API**: Implements `docs/openapi.yaml`. Stateless, horizontally scalable.
+- **Health Checker**: Runs HTTP/HTTPS/TCP/gRPC probes at configured intervals.
+- **Scheduler**: Triggers checks every 60s per service, manages retention cleanup.
+- **WebSocket Hub**: Broadcasts real-time events to connected clients.
+- **OIDC Validator**: Verifies JWT tokens against JWKS endpoint.
 
-Schema for TimescaleDB:
+RBAC: `admin` (full), `editor` (CRUD pages/incidents), `viewer` (read-only).
+
+### 2. PostgreSQL (Single Database)
+
+All data lives in one PostgreSQL instance:
+
+- **Metadata**: status_pages, services, incidents, users, roles
+- **Raw Metrics**: `checks` table with per-check latency and status
+- **Percentiles**: Computed at query time using `PERCENTILE_CONT()`
+
+See `db/migrations/` for the complete schema.
+
+## Database Schema
+
+### Core Tables
+
+See `db/migrations/001_initial_schema.sql` for full DDL.
+
+Key design decisions:
+
+| Table | Purpose |
+|---|---|
+| `status_pages` | Multi-tenant isolation by slug |
+| `services` | Monitored endpoints, scoped to status_page_id |
+| `checks` | Raw health check results (1 row per check) |
+| `incidents` | Incident tracking with severity/status |
+| `incident_updates` | Timeline entries for incidents |
+| `broadcasts` | Banner messages per status page |
+| `users` / `roles` / `user_roles` | OIDC user mapping + RBAC |
+| `config` | Runtime configuration (retention_days, etc.) |
+
+### Checks Table (Raw Metrics)
+
 ```sql
-CREATE TABLE metrics (
-  service_id UUID NOT NULL,
-  timestamp  TIMESTAMPTZ NOT NULL,
-  latency_avg    DOUBLE PRECISION,
-  latency_p95    DOUBLE PRECISION,
-  latency_p99    DOUBLE PRECISION,
-  availability   DOUBLE PRECISION,
-  PRIMARY KEY (service_id, timestamp)
+CREATE TABLE checks (
+  id          BIGINT GENERATED ALWAYS AS IDENTITY,
+  service_id  UUID        NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  timestamp   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  latency_ms  INT         NOT NULL,
+  is_up       BOOLEAN     NOT NULL,
+  status_code INT,
+  error       TEXT
 );
 
-SELECT create_hypertable('metrics', 'timestamp');
+CREATE INDEX idx_checks_service_time ON checks (service_id, timestamp DESC);
+```
 
--- Retention policy: 7 days at 1m, 90 days at 1h
-SELECT add_retention_policy('metrics', INTERVAL '7 days');
+**Why raw storage?**
 
--- Continuous aggregate for hourly rollups
-CREATE MATERIALIZED VIEW metrics_hourly
-WITH (timescaledb.continuous) AS
+- No precomputed percentiles — avoids aggregation errors
+- `PERCENTILE_CONT(0.95)` on 1440 rows (24h × 1/min) completes in <10ms
+- Flexible re-aggregation at any resolution without data loss
+
+## Percentile Strategy
+
+All percentiles are computed at query time using PostgreSQL's ordered-set aggregate functions:
+
+```sql
 SELECT
-  service_id,
-  time_bucket('1 hour', timestamp) AS bucket,
-  avg(latency_avg) AS latency_avg,
-  percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_p95) AS latency_p95,
-  percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_p99) AS latency_p99,
-  avg(availability) AS availability
-FROM metrics
-GROUP BY service_id, bucket;
+  AVG(latency_ms)                                                    AS latency_avg,
+  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)           AS latency_p95,
+  PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)           AS latency_p99,
+  (COUNT(*) FILTER (WHERE is_up)::FLOAT / NULLIF(COUNT(*)::FLOAT, 0)) * 100 AS availability
+FROM checks
+WHERE service_id = $1
+  AND timestamp >= NOW() - INTERVAL '24 hours';
 ```
 
-### 4. PostgreSQL (Metadata)
+For bucketed metrics (chart data), use `get_service_metrics()` function from `db/migrations/002_metric_queries.sql`.
+
+**Do NOT precompute percentiles. Do NOT average percentiles. Always compute from raw data.**
+
+## Retention Strategy
+
+### Configuration
+
+Retention is stored in the `config` table:
+
 ```sql
--- Status Pages
-CREATE TABLE status_pages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name VARCHAR(100) NOT NULL,
-  slug VARCHAR(50) NOT NULL UNIQUE,
-  description VARCHAR(500),
-  logo_url TEXT,
-  brand_color VARCHAR(7),
-  custom_css TEXT,
-  broadcast_message TEXT,
-  broadcast_expires_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Services
-CREATE TABLE services (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id UUID NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
-  name VARCHAR(100) NOT NULL,
-  endpoint TEXT NOT NULL,
-  protocol VARCHAR(5) NOT NULL CHECK (protocol IN ('HTTP', 'HTTPS', 'TCP', 'gRPC')),
-  check_interval_seconds INT NOT NULL DEFAULT 60 CHECK (check_interval_seconds >= 60),
-  timeout_ms INT NOT NULL DEFAULT 5000,
-  expected_status_code INT DEFAULT 200,
-  status VARCHAR(20) DEFAULT 'operational',
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Incidents
-CREATE TABLE incidents (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id UUID NOT NULL REFERENCES status_pages(id),
-  title VARCHAR(200) NOT NULL,
-  status VARCHAR(20) NOT NULL DEFAULT 'investigating',
-  severity VARCHAR(10) NOT NULL DEFAULT 'minor',
-  resolved_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE incident_affected_services (
-  incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
-  service_id UUID REFERENCES services(id) ON DELETE CASCADE,
-  PRIMARY KEY (incident_id, service_id)
-);
-
-CREATE TABLE incident_updates (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  incident_id UUID NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-  status VARCHAR(20) NOT NULL,
-  message TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Broadcasts
-CREATE TABLE broadcasts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id UUID NOT NULL REFERENCES status_pages(id),
-  message TEXT NOT NULL,
-  expires_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
+SELECT value FROM config WHERE key = 'retention_days';  -- default: 30
 ```
 
-### 5. WebSocket Protocol
+### Nightly Cleanup
+
+The backend scheduler runs `cleanup_old_checks()` daily:
+
+```sql
+SELECT cleanup_old_checks();  -- returns number of deleted rows
+```
+
+This deletes all checks older than `retention_days`. The composite index on `(service_id, timestamp DESC)` ensures efficient deletion.
+
+### Partitioning (Optional)
+
+When the `checks` table exceeds ~10M rows, apply `db/migrations/004_partitioning.sql` to partition by month. This enables:
+
+- Fast partition drops instead of row-by-row deletion
+- Parallel query execution across partitions
+- Better vacuum performance
+
+## Load Calculations
+
+| Parameter | Value |
+|---|---|
+| Services | 100 |
+| Check interval | 60 seconds |
+| Checks per day | 144,000 |
+| Checks per month | ~4,320,000 |
+| Row size (avg) | ~120 bytes |
+| Monthly storage | ~500 MB |
+| 30-day retention | ~15M rows, ~1.7 GB |
+
+PostgreSQL handles this easily with proper indexing.
+
+### Query Performance
+
+- 24h metrics for 1 service (1440 rows): **<10ms**
+- Service summary (24h): **<5ms**
+- Retention cleanup (batch delete): **<1s** with index scan
+
+## Health Check Implementation
+
+```go
+// Pseudocode for the health checker
+func (w *Worker) RunCheck(service Service) {
+    start := time.Now()
+    var isUp bool
+    var statusCode int
+    var errMsg string
+
+    switch service.Protocol {
+    case "HTTP", "HTTPS":
+        resp, err := httpClient.Get(service.Endpoint)
+        latency := time.Since(start).Milliseconds()
+        if err != nil {
+            isUp = false
+            errMsg = err.Error()
+        } else {
+            statusCode = resp.StatusCode
+            isUp = (statusCode == service.ExpectedStatusCode)
+        }
+    case "TCP":
+        conn, err := net.DialTimeout("tcp", service.Endpoint, timeout)
+        latency := time.Since(start).Milliseconds()
+        isUp = (err == nil)
+        if err != nil { errMsg = err.Error() }
+        if conn != nil { conn.Close() }
+    case "gRPC":
+        // gRPC health check protocol
+    }
+
+    // Store raw check result
+    db.Exec(`INSERT INTO checks (service_id, latency_ms, is_up, status_code, error)
+             VALUES ($1, $2, $3, $4, $5)`,
+        service.ID, latency, isUp, statusCode, errMsg)
+
+    // Auto-incident logic
+    failures := db.QueryRow(`SELECT get_consecutive_failures($1)`, service.ID)
+    if failures >= 3 && !hasActiveIncident(service.ID) {
+        createAutoIncident(service)
+        updateServiceStatus(service.ID, "down")
+    }
+
+    // Auto-resolve
+    if isUp && hasAutoIncident(service.ID) {
+        resolveAutoIncident(service.ID)
+        updateServiceStatus(service.ID, "operational")
+    }
+}
+```
+
+## Auto-Incident Logic
+
+1. After **3 consecutive failures**, auto-create an incident:
+   - Title: `"[Auto] {service.Name} is down"`
+   - Severity: `major`
+   - Status: `investigating`
+2. When service recovers, auto-resolve:
+   - Add update: `"Service has recovered automatically"`
+   - Set `resolved_at = NOW()`
+   - Set service status back to `operational`
+
+Use `get_consecutive_failures()` from `db/migrations/002_metric_queries.sql`.
+
+## WebSocket Protocol
 
 Connect to `ws://<host>/ws?statusPageId=<uuid>`
 
@@ -146,39 +224,32 @@ Events are JSON:
   "payload": {
     "serviceId": "uuid",
     "previousStatus": "operational",
-    "newStatus": "degraded"
+    "newStatus": "down"
   },
   "timestamp": "2025-01-15T10:30:00Z"
 }
 ```
 
-Event types:
-- `service.status_changed`
-- `incident.created`
-- `incident.updated`
-- `metrics.update`
-- `broadcast.created`
-- `broadcast.expired`
+Event types: `service.status_changed`, `incident.created`, `incident.updated`, `metrics.update`, `broadcast.created`, `broadcast.expired`
 
 ## Health Probes
 
 ```
-GET /healthz         → 200 OK (liveness)
-GET /readyz          → 200 OK (readiness, checks DB connection)
+GET /healthz     → 200 OK (liveness — always returns OK)
+GET /readyz      → 200 OK (readiness — verifies DB connection)
 ```
 
-## Latency Histogram Implementation
+## First-Run Behavior
 
-Use HDR Histogram or t-digest for accurate percentile computation:
+On first OIDC login, if zero users with `admin` role exist, the backend grants `admin` to the first authenticated user. This bootstraps the system without manual SQL.
 
-```go
-// Per check, record latency in histogram
-histogram.RecordValue(latencyMs)
+## Environment Variables
 
-// Every minute, compute and store:
-avg   = histogram.Mean()
-p95   = histogram.ValueAtPercentile(95.0)
-p99   = histogram.ValueAtPercentile(99.0)
-```
-
-Do NOT compute percentiles from averages. Store raw histogram data and compute server-side.
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `OIDC_ISSUER` | Yes | OIDC provider issuer URL |
+| `OIDC_AUDIENCE` | Yes | Expected JWT audience |
+| `LISTEN_ADDR` | No | Server bind address (default: `:8080`) |
+| `CHECK_CONCURRENCY` | No | Max concurrent health checks (default: `50`) |
+| `RETENTION_CLEANUP_CRON` | No | Cron schedule for cleanup (default: `0 3 * * *`) |

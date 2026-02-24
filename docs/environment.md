@@ -1,6 +1,7 @@
 # StatusGuard — Environment Variables
 
-All environment variables are prefixed with `VITE_` for Vite build-time injection.
+All frontend environment variables are prefixed with `VITE_` for Vite build-time injection.
+Backend environment variables are documented in `docs/backend-guide.md`.
 
 ## Required
 
