@@ -5,7 +5,7 @@ import { useMetrics } from '@/hooks/use-metrics';
 import { LoadingState } from '@/components/LoadingState';
 
 export function ServiceCard({ service }: { service: Service }) {
-  const { data: metrics, isLoading } = useMetrics(service.id);
+  const { data: metricsData, isLoading } = useMetrics(service.id);
 
   return (
     <div className="bg-card border border-border rounded-lg p-5 space-y-4">
@@ -28,7 +28,7 @@ export function ServiceCard({ service }: { service: Service }) {
           <LoadingState message="Loading metrics..." className="py-2" />
         </div>
       ) : (
-        <LatencyChart data={metrics?.points || []} />
+        <LatencyChart data={metricsData || []} />
       )}
 
       <div className="grid grid-cols-3 gap-3 pt-1">

@@ -9,7 +9,7 @@ interface Props {
 }
 
 export function ProtectedRoute({ children, requiredRole }: Props) {
-  const { isAuthenticated, isLoading, user, hasRole, login, error } = useAuth();
+  const { isAuthenticated, isLoading, user, hasRole } = useAuth();
 
   if (isLoading) {
     return (
@@ -22,42 +22,8 @@ export function ProtectedRoute({ children, requiredRole }: Props) {
     );
   }
 
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="bg-card border border-destructive/30 rounded-lg p-6 max-w-md text-center">
-          <ShieldAlert className="w-8 h-8 text-destructive mx-auto mb-3" />
-          <h2 className="text-lg font-semibold text-card-foreground mb-2">Authentication Error</h2>
-          <p className="text-sm text-muted-foreground mb-4">{error}</p>
-          <button
-            onClick={() => login()}
-            className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90"
-          >
-            Try Again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="bg-card border border-border rounded-lg p-8 max-w-md text-center">
-          <ShieldAlert className="w-10 h-10 text-muted-foreground mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-card-foreground mb-2">Admin Access Required</h2>
-          <p className="text-sm text-muted-foreground mb-6">
-            Sign in with your organization's identity provider to access the admin panel.
-          </p>
-          <button
-            onClick={() => login()}
-            className="px-6 py-2.5 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity"
-          >
-            Sign in with SSO
-          </button>
-        </div>
-      </div>
-    );
+    return <Navigate to="/login" replace />;
   }
 
   if (requiredRole && !hasRole(requiredRole)) {
