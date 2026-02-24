@@ -15,6 +15,7 @@ import AdminPages from "./pages/admin/AdminPages";
 import AdminServices from "./pages/admin/AdminServices";
 import AdminIncidents from "./pages/admin/AdminIncidents";
 import AdminSettings from "./pages/admin/AdminSettings";
+import AuthCallback from "./pages/AuthCallback";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient({
@@ -40,6 +41,7 @@ const App = () => (
               <Route path="/" element={<Index />} />
               <Route path="/status/:slug" element={<StatusPageView />} />
               <Route path="/login" element={<Login />} />
+              <Route path="/auth/callback" element={<AuthCallback />} />
 
               {/* Admin routes — protected */}
               <Route
