@@ -8,6 +8,7 @@ import { ProtectedRoute } from "@/lib/auth/ProtectedRoute";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import Index from "./pages/Index";
 import StatusPageView from "./pages/StatusPageView";
+import Login from "./pages/Login";
 import AdminLayout from "./components/admin/AdminLayout";
 import AdminOverview from "./pages/admin/AdminOverview";
 import AdminPages from "./pages/admin/AdminPages";
@@ -38,11 +39,9 @@ const App = () => (
               {/* Public routes */}
               <Route path="/" element={<Index />} />
               <Route path="/status/:slug" element={<StatusPageView />} />
+              <Route path="/login" element={<Login />} />
 
-              {/* OIDC callback */}
-              <Route path="/auth/callback" element={<Index />} />
-
-              {/* Admin routes — protected by OIDC */}
+              {/* Admin routes — protected */}
               <Route
                 path="/admin"
                 element={

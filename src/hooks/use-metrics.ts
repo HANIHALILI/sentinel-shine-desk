@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
-import { metricsApi } from '@/lib/api/metrics';
-import type { MetricsResponse, MetricRange, MetricResolution } from '@/lib/api/types';
+import { metrics } from '@/lib/db';
+import type { MetricPoint } from '@/lib/api/types';
 
-export function useMetrics(serviceId: string, range: MetricRange = '24h', resolution: MetricResolution = '1m') {
-  return useQuery<MetricsResponse>({
-    queryKey: ['metrics', serviceId, range, resolution],
-    queryFn: () => metricsApi.get(serviceId, range, resolution),
+export function useMetrics(serviceId: string, rangeHours = 24) {
+  return useQuery<MetricPoint[]>({
+    queryKey: ['metrics', serviceId, rangeHours],
+    queryFn: () => metrics.get(serviceId, rangeHours),
     staleTime: 30_000,
     refetchInterval: 60_000,
     enabled: !!serviceId,

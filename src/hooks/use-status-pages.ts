@@ -1,13 +1,12 @@
 import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { statusPagesApi } from '@/lib/api/status-pages';
-import { wsManager } from '@/lib/api/websocket';
+import { statusPages, realtime } from '@/lib/db';
 import type { StatusPage, StatusPageDetail, PaginatedResponse } from '@/lib/api/types';
 
 export function useStatusPages(page = 1, pageSize = 20) {
   return useQuery<PaginatedResponse<StatusPage>>({
     queryKey: ['status-pages', page, pageSize],
-    queryFn: () => statusPagesApi.list({ page, pageSize }),
+    queryFn: () => statusPages.list(page, pageSize),
     staleTime: 30_000,
   });
 }
@@ -15,28 +14,32 @@ export function useStatusPages(page = 1, pageSize = 20) {
 export function useStatusPage(slug: string) {
   const queryClient = useQueryClient();
 
-  const query = useQuery<StatusPageDetail>({
+  const query = useQuery<StatusPageDetail | null>({
     queryKey: ['status-page', slug],
-    queryFn: () => statusPagesApi.getBySlug(slug),
+    queryFn: () => statusPages.getBySlug(slug),
     staleTime: 15_000,
-    refetchInterval: 60_000, // Fallback polling every 60s
+    refetchInterval: 60_000,
+    enabled: !!slug,
   });
 
-  // Subscribe to WebSocket updates
+  // Subscribe to realtime updates
   useEffect(() => {
-    if (!query.data?.id) return;
+    if (!slug) return;
 
-    wsManager.connect(query.data.id);
+    const unsubs = [
+      realtime.subscribeToTable('services', () => {
+        queryClient.invalidateQueries({ queryKey: ['status-page', slug] });
+      }),
+      realtime.subscribeToTable('incidents', () => {
+        queryClient.invalidateQueries({ queryKey: ['status-page', slug] });
+      }),
+      realtime.subscribeToTable('broadcasts', () => {
+        queryClient.invalidateQueries({ queryKey: ['status-page', slug] });
+      }),
+    ];
 
-    const unsub = wsManager.on('*', () => {
-      queryClient.invalidateQueries({ queryKey: ['status-page', slug] });
-    });
-
-    return () => {
-      unsub();
-      wsManager.disconnect();
-    };
-  }, [query.data?.id, slug, queryClient]);
+    return () => unsubs.forEach(unsub => unsub());
+  }, [slug, queryClient]);
 
   return query;
 }
