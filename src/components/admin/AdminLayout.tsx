@@ -1,5 +1,7 @@
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { Activity, LayoutDashboard, Server, AlertTriangle, Settings, FileText } from 'lucide-react';
+import { useAuth } from '@/lib/auth';
+import { Activity, LayoutDashboard, Server, AlertTriangle, Settings, FileText, LogOut } from 'lucide-react';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 const navItems = [
   { to: '/admin', icon: LayoutDashboard, label: 'Overview', exact: true },
@@ -11,10 +13,10 @@ const navItems = [
 
 export default function AdminLayout() {
   const location = useLocation();
+  const { user, logout } = useAuth();
 
   return (
     <div className="min-h-screen bg-background flex">
-      {/* Sidebar */}
       <aside className="w-60 border-r border-border bg-card flex flex-col shrink-0 hidden md:flex">
         <div className="p-5 border-b border-border">
           <Link to="/" className="flex items-center gap-2.5">
@@ -46,21 +48,31 @@ export default function AdminLayout() {
           })}
         </nav>
         <div className="p-4 border-t border-border">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-xs font-semibold text-muted-foreground">
-              AD
+          {user ? (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-xs font-semibold text-muted-foreground shrink-0">
+                  {user.name?.[0]?.toUpperCase() || user.email?.[0]?.toUpperCase() || 'U'}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-foreground truncate">{user.name || 'User'}</div>
+                  <div className="text-xs text-muted-foreground truncate">{user.roles.join(', ')}</div>
+                </div>
+              </div>
+              <button onClick={() => logout()} className="p-1.5 text-muted-foreground hover:text-foreground">
+                <LogOut className="w-4 h-4" />
+              </button>
             </div>
-            <div>
-              <div className="text-sm font-medium text-foreground">Admin User</div>
-              <div className="text-xs text-muted-foreground">admin@example.com</div>
-            </div>
-          </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">Not authenticated</div>
+          )}
         </div>
       </aside>
 
-      {/* Main */}
       <div className="flex-1 overflow-auto">
-        <Outlet />
+        <ErrorBoundary>
+          <Outlet />
+        </ErrorBoundary>
       </div>
     </div>
   );

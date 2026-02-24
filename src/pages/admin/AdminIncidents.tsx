@@ -1,10 +1,19 @@
-import { getAllStatusPages } from '@/lib/mock-data';
+import { useIncidents } from '@/hooks/use-incidents';
 import { getStatusDotClass, timeAgo } from '@/lib/status-utils';
 import { Plus } from 'lucide-react';
+import { LoadingState } from '@/components/LoadingState';
+import { ErrorState } from '@/components/ErrorState';
+import { EmptyState } from '@/components/EmptyState';
+import { useState } from 'react';
 
 export default function AdminIncidents() {
-  const pages = getAllStatusPages();
-  const allIncidents = pages.flatMap(p => p.incidents.map(i => ({ ...i, pageName: p.name })));
+  const [page, setPage] = useState(1);
+  const { data, isLoading, error, refetch } = useIncidents(undefined, undefined, page, 20);
+
+  if (isLoading) return <div className="p-8"><LoadingState /></div>;
+  if (error) return <div className="p-8"><ErrorState error={error} onRetry={() => refetch()} /></div>;
+
+  const incidents = data?.data || [];
 
   return (
     <div className="p-6 sm:p-8 max-w-5xl">
@@ -16,42 +25,57 @@ export default function AdminIncidents() {
         </button>
       </div>
 
-      <div className="bg-card border border-border rounded-lg divide-y divide-border">
-        {allIncidents.length === 0 ? (
-          <div className="p-8 text-center text-muted-foreground">No incidents recorded.</div>
-        ) : (
-          allIncidents.map(incident => (
-            <div key={incident.id} className="p-5">
-              <div className="flex items-start justify-between">
-                <div className="flex items-start gap-3">
-                  <span className={`mt-1 ${getStatusDotClass(incident.status === 'resolved' ? 'operational' : 'degraded')}`} />
-                  <div>
-                    <h3 className="font-semibold text-card-foreground">{incident.title}</h3>
-                    <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                      <span className="capitalize font-medium">{incident.status}</span>
-                      <span>•</span>
-                      <span>{incident.severity}</span>
-                      <span>•</span>
-                      <span>{incident.pageName}</span>
+      {incidents.length === 0 ? (
+        <EmptyState title="No incidents" description="No incidents have been recorded." />
+      ) : (
+        <>
+          <div className="bg-card border border-border rounded-lg divide-y divide-border">
+            {incidents.map(incident => (
+              <div key={incident.id} className="p-5">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-3">
+                    <span className={`mt-1 ${getStatusDotClass(incident.status === 'resolved' ? 'operational' : 'degraded')}`} />
+                    <div>
+                      <h3 className="font-semibold text-card-foreground">{incident.title}</h3>
+                      <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                        <span className="capitalize font-medium">{incident.status}</span>
+                        <span>•</span>
+                        <span>{incident.severity}</span>
+                        <span>•</span>
+                        <span>{incident.affectedServiceIds.length} service(s)</span>
+                      </div>
                     </div>
                   </div>
+                  <span className="text-xs text-muted-foreground">{timeAgo(incident.createdAt)}</span>
                 </div>
-                <span className="text-xs text-muted-foreground">{timeAgo(incident.createdAt)}</span>
               </div>
-              {incident.updates.length > 0 && (
-                <div className="mt-3 ml-6 pl-3 border-l-2 border-border space-y-2">
-                  {incident.updates.slice(-2).map(u => (
-                    <div key={u.id} className="text-sm">
-                      <span className="text-xs font-medium text-muted-foreground uppercase">{u.status}</span>
-                      <p className="text-card-foreground">{u.message}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
+            ))}
+          </div>
+
+          {/* Pagination */}
+          {data && data.totalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 mt-4">
+              <button
+                disabled={page <= 1}
+                onClick={() => setPage(p => p - 1)}
+                className="px-3 py-1.5 text-sm bg-secondary text-secondary-foreground rounded-md disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <span className="text-sm text-muted-foreground">
+                Page {page} of {data.totalPages}
+              </span>
+              <button
+                disabled={page >= data.totalPages}
+                onClick={() => setPage(p => p + 1)}
+                className="px-3 py-1.5 text-sm bg-secondary text-secondary-foreground rounded-md disabled:opacity-40"
+              >
+                Next
+              </button>
             </div>
-          ))
-        )}
-      </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

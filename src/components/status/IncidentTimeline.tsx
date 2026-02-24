@@ -1,13 +1,14 @@
-import { Incident } from '@/lib/types';
+import type { Incident } from '@/lib/api/types';
 import { getStatusDotClass, timeAgo, formatTime } from '@/lib/status-utils';
 import { ChevronDown } from 'lucide-react';
 import { useState } from 'react';
+import { useIncident } from '@/hooks/use-incidents';
 
 export function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
   if (incidents.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground text-sm">
-        No incidents reported in the past 7 days.
+        No incidents reported.
       </div>
     );
   }
@@ -23,6 +24,7 @@ export function IncidentTimeline({ incidents }: { incidents: Incident[] }) {
 
 function IncidentEntry({ incident }: { incident: Incident }) {
   const [open, setOpen] = useState(incident.status !== 'resolved');
+  const { data: detail } = useIncident(open ? incident.id : '');
 
   const severityColors = {
     minor: 'text-degraded',
@@ -51,15 +53,15 @@ function IncidentEntry({ incident }: { incident: Incident }) {
         <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
 
-      {open && (
+      {open && detail?.updates && (
         <div className="px-5 pb-4 border-t border-border pt-3">
           <div className="space-y-3 relative before:absolute before:left-[7px] before:top-2 before:bottom-2 before:w-px before:bg-border">
-            {incident.updates.map(update => (
+            {detail.updates.map(update => (
               <div key={update.id} className="pl-6 relative">
                 <div className="absolute left-0 top-1.5 w-3.5 h-3.5 rounded-full bg-muted border-2 border-border" />
                 <div className="text-xs text-muted-foreground font-medium uppercase">{update.status}</div>
                 <p className="text-sm text-card-foreground mt-0.5">{update.message}</p>
-                <span className="text-xs text-muted-foreground mt-1 block">{formatTime(update.timestamp)}</span>
+                <span className="text-xs text-muted-foreground mt-1 block">{formatTime(update.createdAt)}</span>
               </div>
             ))}
           </div>
