@@ -69,6 +69,16 @@ export function IncidentDialog({ open, onOpenChange, editIncident, statusPages: 
     onError: (err: any) => toast.error(err.message),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: () => incidents.delete(editIncident!.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['incidents'] });
+      toast.success('Incident deleted');
+      onOpenChange(false);
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     isEdit ? updateMutation.mutate() : createMutation.mutate();
@@ -135,11 +145,18 @@ export function IncidentDialog({ open, onOpenChange, editIncident, statusPages: 
             </label>
             <textarea value={message} onChange={e => setMessage(e.target.value)} required={!isEdit} rows={3} className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm" placeholder="We are investigating reports of..." />
           </div>
-          <div className="flex gap-2 justify-end pt-2">
-            <button type="button" onClick={() => onOpenChange(false)} className="px-4 py-2 text-sm border border-input rounded-md hover:bg-muted">Cancel</button>
-            <button type="submit" disabled={isPending} className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50">
-              {isPending ? 'Saving...' : isEdit ? 'Update' : 'Create'}
-            </button>
+          <div className="flex items-center justify-between pt-2">
+            {isEdit && (
+              <button type="button" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending} className="text-sm text-destructive hover:underline">
+                {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+              </button>
+            )}
+            <div className="flex gap-2 ml-auto">
+              <button type="button" onClick={() => onOpenChange(false)} className="px-4 py-2 text-sm border border-input rounded-md hover:bg-muted">Cancel</button>
+              <button type="submit" disabled={isPending} className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded-md hover:opacity-90 disabled:opacity-50">
+                {isPending ? 'Saving...' : isEdit ? 'Update' : 'Create'}
+              </button>
+            </div>
           </div>
         </form>
       </DialogContent>
