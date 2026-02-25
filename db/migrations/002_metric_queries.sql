@@ -1,8 +1,8 @@
--- StatusGuard — Migration 002: Metric Query Functions
--- Query-time percentile computation using native PostgreSQL.
--- No precomputed aggregates. All computed from raw `checks` table.
+-- StatusGuard — Migration 002: Metric Queries
+-- SQLite version (metrics computed at query time)
 
-BEGIN;
+-- No views or functions needed for SQLite
+-- Metrics are computed directly in the API routes
 
 -- ============================================================
 -- Get aggregated metrics for a service over a time range

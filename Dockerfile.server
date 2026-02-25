@@ -1,0 +1,19 @@
+# Multi-stage build for server
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json package-lock.json* bun.lockb* ./
+RUN npm install
+
+# Copy source
+COPY server ./server
+COPY tsconfig.json tsconfig.node.json ./
+COPY db ./db
+
+# Expose port
+EXPOSE 3001
+
+# Start server
+CMD ["npm", "run", "dev:server"]

@@ -1,154 +1,122 @@
--- StatusGuard — Migration 001: Initial Schema
--- PostgreSQL-only. No external TSDB.
--- Run with: psql -f 001_initial_schema.sql
-
-BEGIN;
-
--- ============================================================
--- Extensions
--- ============================================================
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- StatusGuard — SQLite Schema
+-- Converted from PostgreSQL for SQLite compatibility
 
 -- ============================================================
 -- Status Pages
 -- ============================================================
-CREATE TABLE status_pages (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name          VARCHAR(100) NOT NULL,
-  slug          VARCHAR(50)  NOT NULL UNIQUE,
-  description   VARCHAR(500),
+CREATE TABLE IF NOT EXISTS status_pages (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  slug          TEXT NOT NULL UNIQUE,
+  description   TEXT,
   logo_url      TEXT,
-  brand_color   VARCHAR(7),
+  brand_color   TEXT,
   custom_css    TEXT,
-  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
 );
 
-CREATE INDEX idx_status_pages_slug ON status_pages (slug);
+CREATE INDEX IF NOT EXISTS idx_status_pages_slug ON status_pages (slug);
 
 -- ============================================================
 -- Services
 -- ============================================================
-CREATE TABLE services (
-  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id         UUID         NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
-  name                   VARCHAR(100) NOT NULL,
-  endpoint               TEXT         NOT NULL,
-  protocol               VARCHAR(5)   NOT NULL CHECK (protocol IN ('HTTP', 'HTTPS', 'TCP', 'gRPC')),
-  check_interval_seconds INT          NOT NULL DEFAULT 60 CHECK (check_interval_seconds >= 60),
-  timeout_ms             INT          NOT NULL DEFAULT 5000,
-  expected_status_code   INT          DEFAULT 200,
-  status                 VARCHAR(20)  NOT NULL DEFAULT 'operational'
-                                      CHECK (status IN ('operational', 'degraded', 'down', 'maintenance')),
-  created_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at             TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS services (
+  id                     TEXT PRIMARY KEY,
+  status_page_id         TEXT NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
+  name                   TEXT NOT NULL,
+  endpoint               TEXT NOT NULL,
+  protocol               TEXT NOT NULL CHECK (protocol IN ('HTTP', 'HTTPS', 'TCP', 'gRPC')),
+  check_interval_seconds INTEGER NOT NULL DEFAULT 60 CHECK (check_interval_seconds >= 60),
+  timeout_ms             INTEGER NOT NULL DEFAULT 5000,
+  expected_status_code   INTEGER DEFAULT 200,
+  status                 TEXT NOT NULL DEFAULT 'operational'
+                            CHECK (status IN ('operational', 'degraded', 'down', 'maintenance')),
+  created_at             TEXT NOT NULL,
+  updated_at             TEXT NOT NULL
 );
 
-CREATE INDEX idx_services_status_page ON services (status_page_id);
+CREATE INDEX IF NOT EXISTS idx_services_status_page ON services (status_page_id);
 
 -- ============================================================
--- Raw Metrics (health checks)
--- Single source of truth. Percentiles computed at query time.
+-- Health Check Results
 -- ============================================================
-CREATE TABLE checks (
-  id          BIGINT GENERATED ALWAYS AS IDENTITY,
-  service_id  UUID        NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-  timestamp   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  latency_ms  INT         NOT NULL,  -- response time in milliseconds
-  is_up       BOOLEAN     NOT NULL,  -- true = successful check
-  status_code INT,                   -- HTTP status code (NULL for TCP/gRPC)
-  error       TEXT,                  -- error message if check failed
-  PRIMARY KEY (id)
+CREATE TABLE IF NOT EXISTS health_check_results (
+  id                    TEXT PRIMARY KEY,
+  service_id            TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  status_code           INTEGER,
+  response_time_ms      REAL NOT NULL,
+  is_healthy            BOOLEAN NOT NULL,
+  error_message         TEXT,
+  checked_at            TEXT NOT NULL
 );
 
--- Critical composite index for time-range queries per service
-CREATE INDEX idx_checks_service_time ON checks (service_id, timestamp DESC);
-
--- Partial index for fast "down" lookups (incident auto-creation)
-CREATE INDEX idx_checks_down ON checks (service_id, timestamp DESC) WHERE is_up = false;
+CREATE INDEX IF NOT EXISTS idx_health_check_results_service ON health_check_results (service_id);
+CREATE INDEX IF NOT EXISTS idx_health_check_results_checked_at ON health_check_results (checked_at);
 
 -- ============================================================
 -- Incidents
 -- ============================================================
-CREATE TABLE incidents (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id  UUID         NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
-  title           VARCHAR(200) NOT NULL,
-  status          VARCHAR(20)  NOT NULL DEFAULT 'investigating'
-                               CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
-  severity        VARCHAR(10)  NOT NULL DEFAULT 'minor'
-                               CHECK (severity IN ('minor', 'major', 'critical')),
-  resolved_at     TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS incidents (
+  id            TEXT PRIMARY KEY,
+  title         TEXT NOT NULL,
+  description   TEXT,
+  status        TEXT NOT NULL DEFAULT 'investigating'
+                   CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
+  severity      TEXT NOT NULL DEFAULT 'major'
+                   CHECK (severity IN ('minor', 'major', 'critical')),
+  started_at    TEXT NOT NULL,
+  resolved_at   TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
 );
 
-CREATE INDEX idx_incidents_status_page ON incidents (status_page_id, created_at DESC);
-CREATE INDEX idx_incidents_active ON incidents (status_page_id) WHERE status != 'resolved';
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
 
-CREATE TABLE incident_affected_services (
-  incident_id UUID NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-  service_id  UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-  PRIMARY KEY (incident_id, service_id)
+-- ============================================================
+-- Incident Affected Services (M2M)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS incident_affected_services (
+  id             TEXT PRIMARY KEY,
+  incident_id    TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+  service_id     TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  created_at     TEXT NOT NULL
 );
 
-CREATE TABLE incident_updates (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  incident_id UUID         NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-  status      VARCHAR(20)  NOT NULL
-              CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved')),
-  message     TEXT         NOT NULL,
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+CREATE UNIQUE INDEX IF NOT EXISTS idx_incident_service_unique
+  ON incident_affected_services (incident_id, service_id);
+
+-- ============================================================
+-- Incident Updates (Timeline)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS incident_updates (
+  id            TEXT PRIMARY KEY,
+  incident_id   TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+  status        TEXT NOT NULL DEFAULT 'update'
+                   CHECK (status IN ('investigating', 'identified', 'monitoring', 'resolved', 'update')),
+  message       TEXT NOT NULL,
+  created_at    TEXT NOT NULL
 );
 
-CREATE INDEX idx_incident_updates_incident ON incident_updates (incident_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_incident_updates_incident ON incident_updates (incident_id);
 
 -- ============================================================
 -- Broadcasts
 -- ============================================================
-CREATE TABLE broadcasts (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  status_page_id  UUID NOT NULL REFERENCES status_pages(id) ON DELETE CASCADE,
-  message         TEXT NOT NULL,
-  expires_at      TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_broadcasts_active ON broadcasts (status_page_id, expires_at)
-  WHERE expires_at IS NULL OR expires_at > NOW();
-
--- ============================================================
--- Users & RBAC
--- ============================================================
-CREATE TABLE users (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sub         VARCHAR(255) NOT NULL UNIQUE,  -- OIDC subject claim
-  email       VARCHAR(255),
-  name        VARCHAR(255),
-  created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-  last_login  TIMESTAMPTZ
-);
-
-CREATE TABLE roles (
-  id   SERIAL PRIMARY KEY,
-  name VARCHAR(20) NOT NULL UNIQUE CHECK (name IN ('admin', 'editor', 'viewer'))
-);
-
-CREATE TABLE user_roles (
-  user_id UUID    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role_id INT     NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-  PRIMARY KEY (user_id, role_id)
+CREATE TABLE IF NOT EXISTS broadcasts (
+  id            TEXT PRIMARY KEY,
+  message       TEXT NOT NULL,
+  expires_at    TEXT,
+  created_at    TEXT NOT NULL
 );
 
 -- ============================================================
 -- Configuration
 -- ============================================================
-CREATE TABLE config (
-  key   VARCHAR(100) PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS config (
+  key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
 -- Default retention: 30 days
-INSERT INTO config (key, value) VALUES ('retention_days', '30');
-
-COMMIT;
+INSERT OR IGNORE INTO config (key, value) VALUES ('retention_days', '30');

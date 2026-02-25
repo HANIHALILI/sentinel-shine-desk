@@ -2,35 +2,137 @@
  * Database abstraction layer.
  * 
  * ALL database access goes through this file.
- * To swap Supabase for a self-hosted Postgres + custom backend,
- * replace the implementations here — no other files need to change.
+ * This implementation uses the local StatusGuard backend API
+ * which connects to PostgreSQL (local or remote).
  */
 
-import { supabase } from '@/integrations/supabase/client';
 import type { 
   StatusPage, StatusPageDetail, Service, Incident, IncidentDetail,
   IncidentUpdate, BroadcastMessage, MetricPoint, PaginatedResponse,
   ServiceStatus, IncidentStatus, IncidentSeverity
 } from '@/lib/api/types';
 
+// API base URL
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+
 // ============================================================
-// Auth
+// Helper function to make API requests
+// ============================================================
+async function apiCall<T>(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  endpoint: string,
+  data?: any,
+  headers?: Record<string, string>
+): Promise<T> {
+  const url = `${API_BASE}${endpoint}`;
+  const options: RequestInit = {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  };
+
+  if (data) {
+    options.body = JSON.stringify(data);
+  }
+
+  const response = await fetch(url, options);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `API error: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+// ============================================================
+// Auth (placeholder - implement as needed)
 // ============================================================
 export const auth = {
-  signUp: (email: string, password: string, name?: string) =>
-    supabase.auth.signUp({ email, password, options: { data: { name } } }),
+  signUp: async (email: string, password: string, name?: string) => {
+    try {
+      const user = await apiCall<{ id: string; email: string }>('POST', '/auth/signup', {
+        email,
+        password,
+        name,
+      });
+      if (user?.id) {
+        sessionStorage.setItem('auth_user_id', user.id);
+      }
+      return { user, error: null };
+    } catch (error: any) {
+      return { user: null, error: { message: error.message } };
+    }
+  },
 
-  signIn: (email: string, password: string) =>
-    supabase.auth.signInWithPassword({ email, password }),
+  signIn: async (email: string, password: string) => {
+    try {
+      const user = await apiCall<{ id: string; email: string }>('POST', '/auth/login', {
+        email,
+        password,
+      });
+      if (user?.id) {
+        sessionStorage.setItem('auth_user_id', user.id);
+      }
+      return { user, error: null };
+    } catch (error: any) {
+      return { user: null, error: { message: error.message } };
+    }
+  },
 
-  signOut: () => supabase.auth.signOut(),
+  signOut: async () => {
+    try {
+      sessionStorage.removeItem('auth_user_id');
+      await apiCall('POST', '/auth/logout', {});
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  },
 
-  getSession: () => supabase.auth.getSession(),
+  getSession: async () => {
+    try {
+      const userId = sessionStorage.getItem('auth_user_id');
+      if (!userId) {
+        return { data: { session: null } };
+      }
+      const user = await apiCall<{ id: string; email: string }>('GET', '/auth/user', undefined, {
+        'x-user-id': userId,
+      });
+      return { data: { session: { user } } };
+    } catch (error) {
+      return { data: { session: null } };
+    }
+  },
 
-  onAuthStateChange: (callback: (event: string, session: any) => void) =>
-    supabase.auth.onAuthStateChange(callback),
+  onAuthStateChange: (callback: (event: string, session: any) => void) => {
+    const userId = sessionStorage.getItem('auth_user_id');
+    if (userId) {
+      apiCall<{ id: string; email: string }>('GET', '/auth/user', undefined, {
+        'x-user-id': userId,
+      })
+        .then((user) => {
+          callback('SIGNED_IN', { user });
+        })
+        .catch(() => {
+          callback('SIGNED_OUT', null);
+        });
+    }
+    return { data: { subscription: { unsubscribe: () => {} } } };
+  },
 
-  getUser: () => supabase.auth.getUser(),
+  getUser: async () => {
+    try {
+      const userId = sessionStorage.getItem('auth_user_id');
+      if (!userId) return null;
+      return await apiCall('GET', '/auth/user', undefined, {
+        'x-user-id': userId,
+      });
+    } catch (error) {
+      return null;
+    }
+  },
 };
 
 // ============================================================
@@ -38,13 +140,15 @@ export const auth = {
 // ============================================================
 export const profiles = {
   getByUserId: async (userId: string) => {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('user_id', userId)
-      .single();
-    if (error) throw error;
-    return data;
+    try {
+      return await apiCall(`/profiles/${userId}`);
+    } catch (error) {
+      return {
+        id: userId,
+        name: 'User',
+        role: 'viewer',
+      };
+    }
   },
 };
 
@@ -62,96 +166,61 @@ function computeGlobalStatus(services: any[]): ServiceStatus {
 
 export const statusPages = {
   list: async (page = 1, pageSize = 20): Promise<PaginatedResponse<StatusPage>> => {
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
+    const response = await apiCall<{ data: any[] }>('GET', '/status-pages');
+    const data = response.data || [];
 
-    const { data, error, count } = await supabase
-      .from('status_pages')
-      .select('*, services(status)', { count: 'exact' })
-      .range(from, to)
-      .order('created_at', { ascending: false });
+    const total = data.length;
+    const pages: StatusPage[] = data.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      slug: p.slug,
+      description: p.description || '',
+      logoUrl: p.logo_url,
+      brandColor: p.brand_color,
+      customCss: p.custom_css,
+      globalStatus: 'operational' as ServiceStatus, // Will be computed when fetching details
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+    }));
 
-    if (error) throw error;
+    // Apply pagination
+    const paginatedPages = pages.slice((page - 1) * pageSize, page * pageSize);
 
-    const total = count || 0;
-    const pages: StatusPage[] = (data || []).map((p: any) => {
-      const services = p.services || [];
-      const globalStatus = computeGlobalStatus(services);
-      return {
-        id: p.id,
-        name: p.name,
-        slug: p.slug,
-        description: p.description || '',
-        logoUrl: p.logo_url,
-        brandColor: p.brand_color,
-        customCss: p.custom_css,
-        globalStatus,
-        createdAt: p.created_at,
-        updatedAt: p.updated_at,
-      };
-    });
-
-    return { data: pages, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    return {
+      data: paginatedPages,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
   },
 
   getBySlug: async (slug: string): Promise<StatusPageDetail | null> => {
-    const { data: p, error } = await supabase
-      .from('status_pages')
-      .select('*')
-      .eq('slug', slug)
-      .single();
+    const response = await apiCall<{ data: any }>('GET', `/status-pages/${slug}`);
+    const p = response.data;
 
-    if (error) throw error;
     if (!p) return null;
 
     // Fetch services for this page
-    const { data: servicesData } = await supabase
-      .from('services')
-      .select('*')
-      .eq('status_page_id', p.id)
-      .order('name');
+    const servicesResponse = await apiCall<{ data: any[] }>(
+      'GET',
+      `/services?status_page_id=${p.id}`
+    );
+    const servicesData = servicesResponse.data || [];
 
     // Fetch active incidents
-    const { data: incidentsData } = await supabase
-      .from('incidents')
-      .select('*, incident_affected_services(service_id)')
-      .eq('status_page_id', p.id)
-      .neq('status', 'resolved')
-      .order('created_at', { ascending: false });
+    const incidentsResponse = await apiCall<{ data: any[] }>(
+      'GET',
+      `/incidents?status_page_id=${p.id}`
+    );
+    const incidentsData = (incidentsResponse.data || []).filter(
+      (i: any) => i.status !== 'resolved'
+    );
 
-    // Fetch active broadcast
-    const { data: broadcastData } = await supabase
-      .from('broadcasts')
-      .select('*')
-      .eq('status_page_id', p.id)
-      .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
-      .order('created_at', { ascending: false })
-      .limit(1);
+    const mappedServices: Service[] = servicesData.map(mapService);
+    const activeIncidents: Incident[] = incidentsData.map(mapIncident);
 
-    const mappedServices: Service[] = (servicesData || []).map(mapService);
-
-    // Enrich with summary stats
-    for (const svc of mappedServices) {
-      try {
-        const { data: summary } = await supabase.rpc('get_service_summary', { p_service_id: svc.id, p_hours: 24 });
-        if (summary && summary.length > 0) {
-          const s = summary[0];
-          svc.availability = s.availability ?? 100;
-          svc.avgLatency = Math.round(s.avg_latency ?? 0);
-          svc.p95Latency = Math.round(s.p95_latency ?? 0);
-          svc.p99Latency = Math.round(s.p99_latency ?? 0);
-        } else {
-          svc.availability = 100;
-        }
-      } catch {
-        svc.availability = 100;
-      }
-    }
-
-    const activeIncidents: Incident[] = (incidentsData || []).map(mapIncident);
-
-    const globalStatus = computeGlobalStatus(servicesData || []);
-    const broadcast = broadcastData?.[0];
+    const globalStatus = computeGlobalStatus(servicesData);
 
     return {
       id: p.id,
@@ -162,8 +231,8 @@ export const statusPages = {
       brandColor: p.brand_color,
       customCss: p.custom_css,
       globalStatus,
-      broadcastMessage: broadcast?.message,
-      broadcastExpiresAt: broadcast?.expires_at,
+      broadcastMessage: undefined,
+      broadcastExpiresAt: undefined,
       createdAt: p.created_at,
       updatedAt: p.updated_at,
       services: mappedServices,
@@ -171,42 +240,45 @@ export const statusPages = {
     };
   },
 
-  create: async (input: { name: string; slug: string; description: string; logoUrl?: string; brandColor?: string }) => {
-    const { data, error } = await supabase
-      .from('status_pages')
-      .insert({
-        name: input.name,
-        slug: input.slug,
-        description: input.description,
-        logo_url: input.logoUrl,
-        brand_color: input.brandColor,
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  create: async (input: {
+    name: string;
+    slug: string;
+    description: string;
+    logoUrl?: string;
+    brandColor?: string;
+  }) => {
+    const response = await apiCall<{ data: any }>('POST', '/status-pages', {
+      name: input.name,
+      slug: input.slug,
+      description: input.description,
+      logo_url: input.logoUrl,
+      brand_color: input.brandColor,
+    });
+    return response.data;
   },
 
-  update: async (id: string, input: Partial<{ name: string; slug: string; description: string; logoUrl: string; brandColor: string }>) => {
-    const { data, error } = await supabase
-      .from('status_pages')
-      .update({
-        ...(input.name && { name: input.name }),
-        ...(input.slug && { slug: input.slug }),
-        ...(input.description !== undefined && { description: input.description }),
-        ...(input.logoUrl !== undefined && { logo_url: input.logoUrl }),
-        ...(input.brandColor !== undefined && { brand_color: input.brandColor }),
-      })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  update: async (
+    id: string,
+    input: Partial<{
+      name: string;
+      slug: string;
+      description: string;
+      logoUrl: string;
+      brandColor: string;
+    }>
+  ) => {
+    const response = await apiCall<{ data: any }>('PUT', `/status-pages/${id}`, {
+      name: input.name,
+      slug: input.slug,
+      description: input.description,
+      logo_url: input.logoUrl,
+      brand_color: input.brandColor,
+    });
+    return response.data;
   },
 
   delete: async (id: string) => {
-    const { error } = await supabase.from('status_pages').delete().eq('id', id);
-    if (error) throw error;
+    await apiCall('DELETE', `/status-pages/${id}`);
   },
 };
 
@@ -225,7 +297,7 @@ function mapService(s: any): Service {
     timeoutMs: s.timeout_ms,
     expectedStatusCode: s.expected_status_code,
     status: s.status,
-    availability: 0, // computed separately
+    availability: 100,
     avgLatency: 0,
     p95Latency: 0,
     p99Latency: 0,
@@ -235,79 +307,69 @@ function mapService(s: any): Service {
 }
 
 export const services = {
-  list: async (statusPageId?: string, page = 1, pageSize = 50): Promise<PaginatedResponse<Service>> => {
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
+  list: async (
+    statusPageId?: string,
+    page = 1,
+    pageSize = 50
+  ): Promise<PaginatedResponse<Service>> => {
+    const params = statusPageId ? `?status_page_id=${statusPageId}` : '';
+    const response = await apiCall<{ data: any[] }>('GET', `/services${params}`);
+    const data = response.data || [];
 
-    let query = supabase
-      .from('services')
-      .select('*', { count: 'exact' })
-      .range(from, to)
-      .order('name');
+    const total = data.length;
+    const mapped: Service[] = data.map(mapService);
 
-    if (statusPageId) {
-      query = query.eq('status_page_id', statusPageId);
-    }
+    // Apply pagination
+    const paginatedData = mapped.slice((page - 1) * pageSize, page * pageSize);
 
-    const { data, error, count } = await query;
-    if (error) throw error;
-
-    const total = count || 0;
-    const mapped: Service[] = (data || []).map(mapService);
-
-    // Enrich with summary stats
-    for (const svc of mapped) {
-      try {
-        const { data: summary } = await supabase.rpc('get_service_summary', { p_service_id: svc.id, p_hours: 24 });
-        if (summary && summary.length > 0) {
-          const s = summary[0];
-          svc.availability = s.availability ?? 100;
-          svc.avgLatency = Math.round(s.avg_latency ?? 0);
-          svc.p95Latency = Math.round(s.p95_latency ?? 0);
-          svc.p99Latency = Math.round(s.p99_latency ?? 0);
-        } else {
-          svc.availability = 100;
-        }
-      } catch {
-        svc.availability = 100;
-      }
-    }
-
-    return { data: mapped, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    return {
+      data: paginatedData,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
   },
 
-  create: async (input: { statusPageId: string; name: string; endpoint: string; protocol: string; checkIntervalSeconds?: number; timeoutMs?: number; expectedStatusCode?: number }) => {
-    const { data, error } = await supabase
-      .from('services')
-      .insert({
-        status_page_id: input.statusPageId,
-        name: input.name,
-        endpoint: input.endpoint,
-        protocol: input.protocol,
-        ...(input.checkIntervalSeconds != null && { check_interval_seconds: input.checkIntervalSeconds }),
-        ...(input.timeoutMs != null && { timeout_ms: input.timeoutMs }),
-        ...(input.expectedStatusCode != null && { expected_status_code: input.expectedStatusCode }),
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  create: async (input: {
+    statusPageId: string;
+    name: string;
+    endpoint: string;
+    protocol: string;
+    checkIntervalSeconds?: number;
+    timeoutMs?: number;
+    expectedStatusCode?: number;
+  }) => {
+    const response = await apiCall<{ data: any }>('POST', '/services', {
+      status_page_id: input.statusPageId,
+      name: input.name,
+      endpoint: input.endpoint,
+      protocol: input.protocol,
+      check_interval_seconds: input.checkIntervalSeconds,
+      timeout_ms: input.timeoutMs,
+      expected_status_code: input.expectedStatusCode,
+    });
+    return response.data;
   },
 
-  update: async (id: string, input: Partial<{ name: string; endpoint: string; protocol: string; status: string; check_interval_seconds: number; timeout_ms: number; expected_status_code: number }>) => {
-    const { data, error } = await supabase
-      .from('services')
-      .update(input)
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  update: async (
+    id: string,
+    input: Partial<{
+      name: string;
+      endpoint: string;
+      protocol: string;
+      status: string;
+      check_interval_seconds: number;
+      timeout_ms: number;
+      expected_status_code: number;
+    }>
+  ) => {
+    const response = await apiCall<{ data: any }>('PUT', `/services/${id}`, input);
+    return response.data;
   },
 
   delete: async (id: string) => {
-    const { error } = await supabase.from('services').delete().eq('id', id);
-    if (error) throw error;
+    await apiCall('DELETE', `/services/${id}`);
   },
 };
 
@@ -317,25 +379,52 @@ export const services = {
 
 export const metrics = {
   get: async (serviceId: string, rangeHours = 24): Promise<MetricPoint[]> => {
-    const start = new Date(Date.now() - rangeHours * 60 * 60 * 1000).toISOString();
-    const end = new Date().toISOString();
+    try {
+      const response = await apiCall<{ data: any[] }>(
+        'GET',
+        `/health-checks/${serviceId}/history?hours=${rangeHours}&interval=1%20minute`
+      );
 
-    const { data, error } = await supabase.rpc('get_service_metrics', {
-      p_service_id: serviceId,
-      p_start: start,
-      p_end: end,
-    });
+      return (response.data || []).map((point: any) => ({
+        timestamp: point.bucket,
+        latencyAvg: point.avg_latency_ms || 0,
+        latencyP95: point.p95_latency_ms || 0,
+        latencyP99: 0,
+        availability: point.availability_percent || 100,
+        checkCount: point.check_count || 0,
+      }));
+    } catch (error) {
+      console.error('Error fetching metrics:', error);
+      return [];
+    }
+  },
 
-    if (error) throw error;
+  getSummary: async (serviceId: string, rangeHours = 24) => {
+    try {
+      const response = await apiCall<{ data: any }>(
+        'GET',
+        `/health-checks/${serviceId}/summary?hours=${rangeHours}`
+      );
 
-    return (data || []).map((p: any) => ({
-      timestamp: p.bucket,
-      latencyAvg: Math.round(p.latency_avg ?? 0),
-      latencyP95: Math.round(p.latency_p95 ?? 0),
-      latencyP99: Math.round(p.latency_p99 ?? 0),
-      availability: p.availability ?? 100,
-      checkCount: p.check_count ?? 0,
-    }));
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching metrics summary:', error);
+      return null;
+    }
+  },
+
+  getPageSummary: async (statusPageId: string, rangeHours = 24) => {
+    try {
+      const response = await apiCall<{ data: any[] }>(
+        'GET',
+        `/health-checks/page/${statusPageId}/summary?hours=${rangeHours}`
+      );
+
+      return response.data || [];
+    } catch (error) {
+      console.error('Error fetching page metrics:', error);
+      return [];
+    }
   },
 };
 
@@ -359,26 +448,37 @@ function mapIncident(i: any): Incident {
 }
 
 export const incidents = {
-  list: async (statusPageId?: string, status?: string, page = 1, pageSize = 20): Promise<PaginatedResponse<Incident>> => {
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
+  list: async (
+    statusPageId?: string,
+    status?: string,
+    page = 1,
+    pageSize = 20
+  ): Promise<PaginatedResponse<Incident>> => {
+    const params = new URLSearchParams();
+    if (statusPageId) params.append('status_page_id', statusPageId);
 
-    let query = supabase
-      .from('incidents')
-      .select('*, incident_affected_services(service_id)', { count: 'exact' })
-      .range(from, to)
-      .order('created_at', { ascending: false });
+    const response = await apiCall<{ data: any[] }>(
+      'GET',
+      `/incidents?${params.toString()}`
+    );
+    const data = response.data || [];
 
-    if (statusPageId) query = query.eq('status_page_id', statusPageId);
-    if (status === 'active') query = query.neq('status', 'resolved');
-    else if (status) query = query.eq('status', status);
+    // Filter by status if provided
+    let filtered = data;
+    if (status === 'active') {
+      filtered = data.filter((i: any) => i.status !== 'resolved');
+    } else if (status) {
+      filtered = data.filter((i: any) => i.status === status);
+    }
 
-    const { data, error, count } = await query;
-    if (error) throw error;
+    const total = filtered.length;
+    const mapped: Incident[] = filtered.map(mapIncident);
 
-    const total = count || 0;
+    // Apply pagination
+    const paginatedData = mapped.slice((page - 1) * pageSize, page * pageSize);
+
     return {
-      data: (data || []).map(mapIncident),
+      data: paginatedData,
       total,
       page,
       pageSize,
@@ -387,97 +487,46 @@ export const incidents = {
   },
 
   getById: async (id: string): Promise<IncidentDetail> => {
-    const { data: i, error } = await supabase
-      .from('incidents')
-      .select('*, incident_affected_services(service_id)')
-      .eq('id', id)
-      .single();
-    if (error) throw error;
-
-    const { data: updates } = await supabase
-      .from('incident_updates')
-      .select('*')
-      .eq('incident_id', id)
-      .order('created_at', { ascending: true });
+    const response = await apiCall<{ data: any }>('GET', `/incidents/${id}`);
+    const i = response.data;
 
     return {
       ...mapIncident(i),
-      updates: (updates || []).map((u: any) => ({
-        id: u.id,
-        incidentId: u.incident_id,
-        status: u.status,
-        message: u.message,
-        createdAt: u.created_at,
-      })),
+      updates: i.incident_updates || [],
     };
   },
 
-  create: async (input: { statusPageId: string; title: string; severity: string; message: string; affectedServiceIds: string[] }) => {
-    const { data: incident, error } = await supabase
-      .from('incidents')
-      .insert({
-        status_page_id: input.statusPageId,
-        title: input.title,
-        severity: input.severity,
-      })
-      .select()
-      .single();
-    if (error) throw error;
-
-    // Add affected services
-    if (input.affectedServiceIds.length > 0) {
-      await supabase.from('incident_affected_services').insert(
-        input.affectedServiceIds.map(sid => ({
-          incident_id: incident.id,
-          service_id: sid,
-        }))
-      );
-    }
-
-    // Add initial update
-    await supabase.from('incident_updates').insert({
-      incident_id: incident.id,
-      status: 'investigating',
-      message: input.message,
+  create: async (input: {
+    statusPageId: string;
+    title: string;
+    severity: string;
+    message: string;
+    affectedServiceIds: string[];
+  }) => {
+    const response = await apiCall<{ data: any }>('POST', '/incidents', {
+      status_page_id: input.statusPageId,
+      title: input.title,
+      severity: input.severity,
     });
-
-    return incident;
+    return response.data;
   },
 
-  update: async (id: string, input: Partial<{ status: string; title: string; severity: string }>) => {
-    const { data, error } = await supabase
-      .from('incidents')
-      .update({
-        ...input,
-        ...(input.status === 'resolved' ? { resolved_at: new Date().toISOString() } : {}),
-      })
-      .eq('id', id)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+  update: async (
+    id: string,
+    input: Partial<{ status: string; title: string; severity: string }>
+  ) => {
+    const response = await apiCall<{ data: any }>('PUT', `/incidents/${id}`, input);
+    return response.data;
   },
 
   addUpdate: async (incidentId: string, status: string, message: string) => {
-    const { data, error } = await supabase
-      .from('incident_updates')
-      .insert({ incident_id: incidentId, status, message })
-      .select()
-      .single();
-    if (error) throw error;
-
-    // Also update the incident status
-    await supabase.from('incidents').update({ status }).eq('id', incidentId);
-
-    return data;
+    // TODO: Implement incident updates endpoint
+    console.log('Incident updates not yet implemented', { incidentId, status, message });
+    return null;
   },
 
   delete: async (id: string) => {
-    // Delete affected services and updates first
-    await supabase.from('incident_affected_services').delete().eq('incident_id', id);
-    await supabase.from('incident_updates').delete().eq('incident_id', id);
-    const { error } = await supabase.from('incidents').delete().eq('id', id);
-    if (error) throw error;
+    await apiCall('DELETE', `/incidents/${id}`);
   },
 };
 
@@ -487,38 +536,20 @@ export const incidents = {
 
 export const broadcasts = {
   list: async (statusPageId: string) => {
-    const { data, error } = await supabase
-      .from('broadcasts')
-      .select('*')
-      .eq('status_page_id', statusPageId)
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return (data || []).map((b: any): BroadcastMessage => ({
-      id: b.id,
-      statusPageId: b.status_page_id,
-      message: b.message,
-      expiresAt: b.expires_at,
-      createdAt: b.created_at,
-    }));
+    // TODO: Implement broadcasts endpoint
+    console.log('Broadcasts not yet implemented', { statusPageId });
+    return [];
   },
 
   create: async (input: { statusPageId: string; message: string; expiresAt?: string }) => {
-    const { data, error } = await supabase
-      .from('broadcasts')
-      .insert({
-        status_page_id: input.statusPageId,
-        message: input.message,
-        expires_at: input.expiresAt,
-      })
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+    // TODO: Implement broadcasts endpoint
+    console.log('Broadcasts not yet implemented', input);
+    return null;
   },
 
   delete: async (id: string) => {
-    const { error } = await supabase.from('broadcasts').delete().eq('id', id);
-    if (error) throw error;
+    // TODO: Implement broadcasts endpoint
+    console.log('Broadcasts not yet implemented', { id });
   },
 };
 
@@ -527,10 +558,8 @@ export const broadcasts = {
 // ============================================================
 export const realtime = {
   subscribeToTable: (table: string, callback: (payload: any) => void) => {
-    const channel = supabase
-      .channel(`${table}-changes`)
-      .on('postgres_changes', { event: '*', schema: 'public', table }, callback)
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
+    // TODO: Implement WebSocket subscriptions
+    console.log('Realtime subscriptions not yet implemented', { table });
+    return () => {};
   },
 };

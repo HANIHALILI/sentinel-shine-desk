@@ -50,17 +50,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser({
         id: authUser.id,
         sub: authUser.id,
-        name: profile.name || authUser.email?.split('@')[0],
+        name: authUser.name || profile.name || authUser.email?.split('@')[0],
         email: authUser.email,
-        roles: [profile.role as 'admin' | 'editor' | 'viewer'],
+        roles: [(authUser.role || profile.role || 'viewer') as 'admin' | 'editor' | 'viewer'],
       });
     } catch {
       setUser({
         id: authUser.id,
         sub: authUser.id,
-        name: authUser.email?.split('@')[0],
+        name: authUser.name || authUser.email?.split('@')[0],
         email: authUser.email,
-        roles: ['viewer'],
+        roles: [(authUser.role || 'viewer') as 'admin' | 'editor' | 'viewer'],
       });
     }
   }, []);
@@ -87,44 +87,69 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     // ── Cloud mode: use Supabase session ──────────────
-    auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        loadProfile(session.user).finally(() => setIsLoading(false));
-      } else {
+    if (auth?.getSession) {
+      auth.getSession().then((result) => {
+        const session = result?.data?.session;
+        if (session?.user) {
+          loadProfile(session.user).finally(() => setIsLoading(false));
+        } else {
+          setIsLoading(false);
+        }
+      }).catch(() => {
         setIsLoading(false);
-      }
-    });
+      });
 
-    const { data: { subscription } } = auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        await loadProfile(session.user);
-      } else {
-        setUser(null);
-      }
-    });
+      try {
+        const result = auth.onAuthStateChange(async (_event, session) => {
+          if (session?.user) {
+            await loadProfile(session.user);
+          } else {
+            setUser(null);
+          }
+        });
 
-    return () => subscription.unsubscribe();
+        const subscription = result?.data?.subscription;
+        if (subscription?.unsubscribe) {
+          return () => subscription.unsubscribe();
+        }
+      } catch (err) {
+        console.error('Auth state change listener error:', err);
+      }
+      return;
+    } else {
+      setIsLoading(false);
+    }
   }, [loadProfile, oidcMode]);
 
   const login = useCallback(async (email: string, password: string) => {
     if (oidcMode) throw new Error('Use OIDC login in offline mode');
     setError(null);
-    const { error: err } = await auth.signIn(email, password);
+    const result = await auth.signIn(email, password);
+    const err = result?.error;
+    const user = result?.user;
     if (err) {
       setError(err.message);
       throw err;
     }
-  }, [oidcMode]);
+    if (user) {
+      await loadProfile(user);
+    }
+  }, [oidcMode, loadProfile]);
 
   const signUp = useCallback(async (email: string, password: string, name?: string) => {
     if (oidcMode) throw new Error('Signup not available in OIDC mode');
     setError(null);
-    const { error: err } = await auth.signUp(email, password, name);
+    const result = await auth.signUp(email, password, name);
+    const err = result?.error;
+    const user = result?.user;
     if (err) {
       setError(err.message);
       throw err;
     }
-  }, [oidcMode]);
+    if (user) {
+      await loadProfile(user);
+    }
+  }, [oidcMode, loadProfile]);
 
   const loginWithOIDC = useCallback(async () => {
     setError(null);
