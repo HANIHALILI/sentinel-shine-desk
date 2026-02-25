@@ -21,6 +21,9 @@ export function ServiceDialog({ open, onOpenChange, editService, statusPages: pa
   const [protocol, setProtocol] = useState<string>(editService?.protocol || 'HTTPS');
   const [statusPageId, setStatusPageId] = useState(editService?.statusPageId || pages[0]?.id || '');
   const [status, setStatus] = useState<string>(editService?.status || 'operational');
+  const [checkInterval, setCheckInterval] = useState(editService?.checkIntervalSeconds || 60);
+  const [timeoutMs, setTimeoutMs] = useState(editService?.timeoutMs || 5000);
+  const [expectedStatus, setExpectedStatus] = useState(editService?.expectedStatusCode || 200);
 
   const handleOpenChange = (v: boolean) => {
     if (v && editService) {
@@ -29,8 +32,12 @@ export function ServiceDialog({ open, onOpenChange, editService, statusPages: pa
       setProtocol(editService.protocol);
       setStatusPageId(editService.statusPageId);
       setStatus(editService.status);
+      setCheckInterval(editService.checkIntervalSeconds);
+      setTimeoutMs(editService.timeoutMs);
+      setExpectedStatus(editService.expectedStatusCode);
     } else if (v) {
       setName(''); setEndpoint(''); setProtocol('HTTPS'); setStatusPageId(pages[0]?.id || ''); setStatus('operational');
+      setCheckInterval(60); setTimeoutMs(5000); setExpectedStatus(200);
     }
     onOpenChange(v);
   };
@@ -38,9 +45,19 @@ export function ServiceDialog({ open, onOpenChange, editService, statusPages: pa
   const mutation = useMutation({
     mutationFn: async () => {
       if (isEdit) {
-        return services.update(editService!.id, { name, endpoint, protocol, status });
+        return services.update(editService!.id, {
+          name, endpoint, protocol, status,
+          check_interval_seconds: checkInterval,
+          timeout_ms: timeoutMs,
+          expected_status_code: expectedStatus,
+        });
       }
-      return services.create({ statusPageId, name, endpoint, protocol });
+      return services.create({
+        statusPageId, name, endpoint, protocol,
+        checkIntervalSeconds: checkInterval,
+        timeoutMs,
+        expectedStatusCode: expectedStatus,
+      });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['services'] });
@@ -102,6 +119,26 @@ export function ServiceDialog({ open, onOpenChange, editService, statusPages: pa
               </div>
             )}
           </div>
+
+          {/* Monitoring Config */}
+          <div className="border-t border-border pt-3">
+            <h3 className="text-sm font-medium text-foreground mb-3">Monitoring Config</h3>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">Interval (s)</label>
+                <input type="number" value={checkInterval} onChange={e => setCheckInterval(Number(e.target.value))} min={10} className="w-full px-2 py-1.5 bg-background border border-input rounded-md text-sm font-mono" />
+              </div>
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">Timeout (ms)</label>
+                <input type="number" value={timeoutMs} onChange={e => setTimeoutMs(Number(e.target.value))} min={500} className="w-full px-2 py-1.5 bg-background border border-input rounded-md text-sm font-mono" />
+              </div>
+              <div>
+                <label className="block text-xs text-muted-foreground mb-1">Expected Status</label>
+                <input type="number" value={expectedStatus} onChange={e => setExpectedStatus(Number(e.target.value))} className="w-full px-2 py-1.5 bg-background border border-input rounded-md text-sm font-mono" />
+              </div>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between pt-2">
             {isEdit && (
               <button type="button" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending} className="text-sm text-destructive hover:underline">Delete</button>

@@ -276,7 +276,7 @@ export const services = {
     return { data: mapped, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   },
 
-  create: async (input: { statusPageId: string; name: string; endpoint: string; protocol: string }) => {
+  create: async (input: { statusPageId: string; name: string; endpoint: string; protocol: string; checkIntervalSeconds?: number; timeoutMs?: number; expectedStatusCode?: number }) => {
     const { data, error } = await supabase
       .from('services')
       .insert({
@@ -284,6 +284,9 @@ export const services = {
         name: input.name,
         endpoint: input.endpoint,
         protocol: input.protocol,
+        ...(input.checkIntervalSeconds != null && { check_interval_seconds: input.checkIntervalSeconds }),
+        ...(input.timeoutMs != null && { timeout_ms: input.timeoutMs }),
+        ...(input.expectedStatusCode != null && { expected_status_code: input.expectedStatusCode }),
       })
       .select()
       .single();
@@ -291,7 +294,7 @@ export const services = {
     return data;
   },
 
-  update: async (id: string, input: Partial<{ name: string; endpoint: string; protocol: string; status: string }>) => {
+  update: async (id: string, input: Partial<{ name: string; endpoint: string; protocol: string; status: string; check_interval_seconds: number; timeout_ms: number; expected_status_code: number }>) => {
     const { data, error } = await supabase
       .from('services')
       .update(input)
@@ -467,6 +470,14 @@ export const incidents = {
     await supabase.from('incidents').update({ status }).eq('id', incidentId);
 
     return data;
+  },
+
+  delete: async (id: string) => {
+    // Delete affected services and updates first
+    await supabase.from('incident_affected_services').delete().eq('incident_id', id);
+    await supabase.from('incident_updates').delete().eq('incident_id', id);
+    const { error } = await supabase.from('incidents').delete().eq('id', id);
+    if (error) throw error;
   },
 };
 
